@@ -11,6 +11,10 @@
 
 - (void)awakeFromNib {
     [self registerForDraggedTypes:@[NSFilenamesPboardType]];
+    
+    // Set text field to align right for better path visibility
+    NSTextFieldCell *cell = [self cell];
+    [cell setLineBreakMode:NSLineBreakByTruncatingHead];
 }
 
 - (BOOL)performDragOperation:(id <NSDraggingInfo>)sender

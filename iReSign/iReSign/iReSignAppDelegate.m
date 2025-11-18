@@ -36,14 +36,70 @@ static NSString *kiTunesMetadataFileName            = @"iTunesMetadata";
     extensionProvisioningProfiles = [[NSMutableDictionary alloc] init];
     extensionTextFields = [[NSMutableDictionary alloc] init];
     extensionEntitlements = [[NSMutableDictionary alloc] init];
+    extensionBundleIDs = [[NSMutableDictionary alloc] init];
     
     // Look up available signing certificates
     [self getCerts];
     
+    // Configure text fields for better path display
+    [[pathField cell] setLineBreakMode:NSLineBreakByTruncatingHead];
+    [[provisioningPathField cell] setLineBreakMode:NSLineBreakByTruncatingHead];
+    [[entitlementField cell] setLineBreakMode:NSLineBreakByTruncatingHead];
+    [[bundleIDField cell] setLineBreakMode:NSLineBreakByTruncatingMiddle];
+    
+    // Configure status label for better display
+    // Allow wrapping and adjust the frame to be above the resign button
+    [statusLabel setLineBreakMode:NSLineBreakByWordWrapping];
+    [statusLabel setMaximumNumberOfLines:2];
+    
+    // Move status label above resign button if needed
+    NSRect statusFrame = [statusLabel frame];
+    NSRect resignButtonFrame = [resignButton frame];
+    
+    // Position status label above the resign button with some padding
+    statusFrame.origin.y = resignButtonFrame.origin.y + resignButtonFrame.size.height + 10;
+    statusFrame.size.width = resignButtonFrame.origin.x + resignButtonFrame.size.width - statusFrame.origin.x;
+    statusFrame.size.height = 40; // Increase height for 2 lines
+    [statusLabel setFrame:statusFrame];
+    
+    // Adjust flurry (loading indicator) position to align with status label
+    NSRect flurryFrame = [flurry frame];
+    // Position flurry at the left of status label, vertically centered
+    flurryFrame.origin.x = statusFrame.origin.x - flurryFrame.size.width - 8; // 8px padding
+    flurryFrame.origin.y = statusFrame.origin.y + (statusFrame.size.height - flurryFrame.size.height) / 2;
+    [flurry setFrame:flurryFrame];
+    
+    // Restore last used paths
+    if ([defaults valueForKey:@"IPA_PATH"])
+        [pathField setStringValue:[defaults valueForKey:@"IPA_PATH"]];
     if ([defaults valueForKey:@"ENTITLEMENT_PATH"])
         [entitlementField setStringValue:[defaults valueForKey:@"ENTITLEMENT_PATH"]];
     if ([defaults valueForKey:@"MOBILEPROVISION_PATH"])
         [provisioningPathField setStringValue:[defaults valueForKey:@"MOBILEPROVISION_PATH"]];
+    
+    // Restore Bundle ID change checkbox state
+    NSNumber *bundleIDChangeEnabled = [defaults valueForKey:@"BUNDLE_ID_CHANGE_ENABLED"];
+    if (bundleIDChangeEnabled) {
+        [changeBundleIDCheckbox setState:[bundleIDChangeEnabled boolValue] ? NSControlStateValueOn : NSControlStateValueOff];
+        [bundleIDField setEnabled:[bundleIDChangeEnabled boolValue]];
+    }
+    
+    // Restore Bundle ID value if checkbox was enabled
+    if ([changeBundleIDCheckbox state] == NSControlStateValueOn) {
+        if ([defaults valueForKey:kKeyPrefsBundleIDChange]) {
+            [bundleIDField setStringValue:[defaults valueForKey:kKeyPrefsBundleIDChange]];
+        }
+    }
+    
+    // Restore extension configurations
+    NSDictionary *savedExtensionProfiles = [defaults objectForKey:@"EXTENSION_PROVISIONING_PROFILES"];
+    if (savedExtensionProfiles) {
+        [extensionProvisioningProfiles addEntriesFromDictionary:savedExtensionProfiles];
+    }
+    NSDictionary *savedExtensionBundleIDs = [defaults objectForKey:@"EXTENSION_BUNDLE_IDS"];
+    if (savedExtensionBundleIDs) {
+        [extensionBundleIDs addEntriesFromDictionary:savedExtensionBundleIDs];
+    }
     
     if (![[NSFileManager defaultManager] fileExistsAtPath:@"/usr/bin/zip"]) {
         [self showAlertOfKind:NSCriticalAlertStyle WithTitle:@"Error" AndMessage:@"This app cannot run without the zip utility present at /usr/bin/zip"];
@@ -61,11 +117,21 @@ static NSString *kiTunesMetadataFileName            = @"iTunesMetadata";
 
 
 - (IBAction)resign:(id)sender {
-    //Save cert name
+    //Save settings
     [defaults setValue:[NSNumber numberWithInteger:[certComboBox indexOfSelectedItem]] forKey:@"CERT_INDEX"];
+    [defaults setValue:[pathField stringValue] forKey:@"IPA_PATH"];
     [defaults setValue:[entitlementField stringValue] forKey:@"ENTITLEMENT_PATH"];
     [defaults setValue:[provisioningPathField stringValue] forKey:@"MOBILEPROVISION_PATH"];
-    [defaults setValue:[bundleIDField stringValue] forKey:kKeyPrefsBundleIDChange];
+    
+    // Save Bundle ID change checkbox state
+    BOOL bundleIDChangeEnabled = (changeBundleIDCheckbox.state == NSControlStateValueOn);
+    [defaults setValue:[NSNumber numberWithBool:bundleIDChangeEnabled] forKey:@"BUNDLE_ID_CHANGE_ENABLED"];
+    
+    // Save Bundle ID value if checkbox is enabled
+    if (bundleIDChangeEnabled) {
+        [defaults setValue:[bundleIDField stringValue] forKey:kKeyPrefsBundleIDChange];
+    }
+    
     [defaults synchronize];
     
     codesigningResult = nil;
@@ -183,17 +249,33 @@ static NSString *kiTunesMetadataFileName            = @"iTunesMetadata";
                 }
             }
             
-            // If extensions found, prompt user to configure them
+            // If extensions found, prompt user to configure them (only if not already configured)
             if ([extensions count] > 0) {
-                NSAlert *alert = [[NSAlert alloc] init];
-                [alert setMessageText:@"Extensions Detected"];
-                [alert setInformativeText:[NSString stringWithFormat:@"Found %lu extension(s) in the app. Do you want to configure provisioning profiles for them now?", (unsigned long)[extensions count]]];
-                [alert addButtonWithTitle:@"Configure"];
-                [alert addButtonWithTitle:@"Skip"];
+                // Check if user has already configured any extensions
+                BOOL hasConfiguredExtensions = NO;
+                for (NSString *extensionPath in extensions) {
+                    NSString *extensionName = [extensionPath lastPathComponent];
+                    if ([extensionProvisioningProfiles objectForKey:extensionName] != nil ||
+                        [extensionBundleIDs objectForKey:extensionName] != nil) {
+                        hasConfiguredExtensions = YES;
+                        break;
+                    }
+                }
                 
-                NSModalResponse response = [alert runModal];
-                if (response == NSAlertFirstButtonReturn) {
-                    [self manageExtensions:nil];
+                if (!hasConfiguredExtensions) {
+                    // User hasn't configured extensions yet, ask if they want to
+                    NSAlert *alert = [[NSAlert alloc] init];
+                    [alert setMessageText:@"检测到扩展"];
+                    [alert setInformativeText:[NSString stringWithFormat:@"在应用中发现 %lu 个扩展。是否现在配置它们的 Provisioning Profile？", (unsigned long)[extensions count]]];
+                    [alert addButtonWithTitle:@"配置"];
+                    [alert addButtonWithTitle:@"跳过"];
+                    
+                    NSModalResponse response = [alert runModal];
+                    if (response == NSAlertFirstButtonReturn) {
+                        [self manageExtensions:nil];
+                    }
+                } else {
+                    NSLog(@"✓ Extensions already configured, skipping configuration prompt");
                 }
             }
             
@@ -241,17 +323,33 @@ static NSString *kiTunesMetadataFileName            = @"iTunesMetadata";
             }
         }
         
-        // If extensions found, prompt user to configure them
+        // If extensions found, prompt user to configure them (only if not already configured)
         if ([extensions count] > 0) {
-            NSAlert *alert = [[NSAlert alloc] init];
-            [alert setMessageText:@"Extensions Detected"];
-            [alert setInformativeText:[NSString stringWithFormat:@"Found %lu extension(s) in the app. Do you want to configure provisioning profiles for them now?", (unsigned long)[extensions count]]];
-            [alert addButtonWithTitle:@"Configure"];
-            [alert addButtonWithTitle:@"Skip"];
+            // Check if user has already configured any extensions
+            BOOL hasConfiguredExtensions = NO;
+            for (NSString *extensionPath in extensions) {
+                NSString *extensionName = [extensionPath lastPathComponent];
+                if ([extensionProvisioningProfiles objectForKey:extensionName] != nil ||
+                    [extensionBundleIDs objectForKey:extensionName] != nil) {
+                    hasConfiguredExtensions = YES;
+                    break;
+                }
+            }
             
-            NSModalResponse response = [alert runModal];
-            if (response == NSAlertFirstButtonReturn) {
-                [self manageExtensions:nil];
+            if (!hasConfiguredExtensions) {
+                // User hasn't configured extensions yet, ask if they want to
+                NSAlert *alert = [[NSAlert alloc] init];
+                [alert setMessageText:@"检测到扩展"];
+                [alert setInformativeText:[NSString stringWithFormat:@"在应用中发现 %lu 个扩展。是否现在配置它们的 Provisioning Profile？", (unsigned long)[extensions count]]];
+                [alert addButtonWithTitle:@"配置"];
+                [alert addButtonWithTitle:@"跳过"];
+                
+                NSModalResponse response = [alert runModal];
+                if (response == NSAlertFirstButtonReturn) {
+                    [self manageExtensions:nil];
+                }
+            } else {
+                NSLog(@"✓ Extensions already configured, skipping configuration prompt");
             }
         }
         
@@ -281,6 +379,7 @@ static NSString *kiTunesMetadataFileName            = @"iTunesMetadata";
     
     success &= [self doAppBundleIDChange:newBundleID];
     success &= [self doITunesMetadataBundleIDChange:newBundleID];
+    success &= [self doExtensionsBundleIDChange];
     
     return success;
 }
@@ -334,9 +433,61 @@ static NSString *kiTunesMetadataFileName            = @"iTunesMetadata";
     return NO;
 }
 
+- (BOOL)doExtensionsBundleIDChange {
+    BOOL success = YES;
+    
+    if ([extensions count] == 0) {
+        NSLog(@"No extensions to update Bundle IDs");
+        return YES;
+    }
+    
+    for (NSString *extension in extensions) {
+        NSString *extensionName = [extension lastPathComponent];
+        NSString *newExtensionBundleID = [extensionBundleIDs objectForKey:extensionName];
+        
+        if (!newExtensionBundleID || [newExtensionBundleID length] == 0) {
+            NSLog(@"No Bundle ID configured for extension %@, skipping", extensionName);
+            continue;
+        }
+        
+        // Find the extension path
+        NSString *plugInsPath = [appPath stringByAppendingPathComponent:@"PlugIns"];
+        NSString *extensionPath = [plugInsPath stringByAppendingPathComponent:extensionName];
+        
+        if (![[NSFileManager defaultManager] fileExistsAtPath:extensionPath]) {
+            NSLog(@"Extension path not found: %@", extensionPath);
+            success = NO;
+            continue;
+        }
+        
+        NSString *extensionInfoPlistPath = [extensionPath stringByAppendingPathComponent:kInfoPlistFilename];
+        
+        if (![[NSFileManager defaultManager] fileExistsAtPath:extensionInfoPlistPath]) {
+            NSLog(@"Extension Info.plist not found: %@", extensionInfoPlistPath);
+            success = NO;
+            continue;
+        }
+        
+        BOOL changeSuccess = [self changeBundleIDForFile:extensionInfoPlistPath 
+                                             bundleIDKey:kKeyBundleIDPlistApp 
+                                             newBundleID:newExtensionBundleID 
+                                         plistOutOptions:NSPropertyListBinaryFormat_v1_0];
+        
+        if (changeSuccess) {
+            NSLog(@"✓ Updated Bundle ID for extension %@ to %@", extensionName, newExtensionBundleID);
+        } else {
+            NSLog(@"✗ Failed to update Bundle ID for extension %@", extensionName);
+            success = NO;
+        }
+    }
+    
+    return success;
+}
+
 
 - (void)scanForExtensions {
     // Scan for extensions in the app bundle
+    // Note: We preserve extension configurations even when rescanning
     [extensions removeAllObjects];
     [extensionEntitlements removeAllObjects];
     
@@ -354,6 +505,13 @@ static NSString *kiTunesMetadataFileName            = @"iTunesMetadata";
     
     if ([extensions count] > 0) {
         NSLog(@"Found %lu extension(s)", (unsigned long)[extensions count]);
+        // Log currently configured extensions
+        if ([extensionProvisioningProfiles count] > 0) {
+            NSLog(@"Extension provisioning profiles configured: %@", [extensionProvisioningProfiles allKeys]);
+        }
+        if ([extensionBundleIDs count] > 0) {
+            NSLog(@"Extension Bundle IDs configured: %@", [extensionBundleIDs allKeys]);
+        }
     }
 }
 
@@ -469,8 +627,12 @@ static NSString *kiTunesMetadataFileName            = @"iTunesMetadata";
         return;
     }
     
-    NSLog(@"Processing provisioning for %lu extension(s)", (unsigned long)[extensions count]);
-    NSLog(@"Extension provisioning profiles dictionary: %@", extensionProvisioningProfiles);
+    NSLog(@"========== Starting Extensions Provisioning ==========");
+    NSLog(@"Total extensions found: %lu", (unsigned long)[extensions count]);
+    NSLog(@"Extension paths: %@", extensions);
+    NSLog(@"Configured provisioning profiles: %@", extensionProvisioningProfiles);
+    NSLog(@"Configured Bundle IDs: %@", extensionBundleIDs);
+    NSLog(@"====================================================");
     
     BOOL hasErrors = NO;
     NSInteger processedCount = 0;
@@ -479,9 +641,10 @@ static NSString *kiTunesMetadataFileName            = @"iTunesMetadata";
         NSString *extensionName = [extensionPath lastPathComponent];
         NSString *provisioningPath = [extensionProvisioningProfiles objectForKey:extensionName];
         
-        NSLog(@"Processing extension: %@", extensionName);
-        NSLog(@"Extension path: %@", extensionPath);
-        NSLog(@"Provisioning profile path: %@", provisioningPath);
+        NSLog(@"\n--- Processing extension: %@ ---", extensionName);
+        NSLog(@"Extension full path: %@", extensionPath);
+        NSLog(@"Looking for provisioning with key: %@", extensionName);
+        NSLog(@"Found provisioning profile path: %@", provisioningPath ? provisioningPath : @"(none configured)");
         
         if (provisioningPath && [provisioningPath length] > 0) {
             // Verify source file exists
@@ -964,6 +1127,10 @@ static NSString *kiTunesMetadataFileName            = @"iTunesMetadata";
     {
         NSString* fileNameOpened = [[[openDlg URLs] objectAtIndex:0] path];
         [pathField setStringValue:fileNameOpened];
+        
+        // Save the path for next time
+        [defaults setValue:fileNameOpened forKey:@"IPA_PATH"];
+        [defaults synchronize];
     }
 }
 
@@ -980,6 +1147,13 @@ static NSString *kiTunesMetadataFileName            = @"iTunesMetadata";
     {
         NSString* fileNameOpened = [[[openDlg URLs] objectAtIndex:0] path];
         [provisioningPathField setStringValue:fileNameOpened];
+        
+        // Save the path for next time
+        [defaults setValue:fileNameOpened forKey:@"MOBILEPROVISION_PATH"];
+        [defaults synchronize];
+        
+        // Auto-generate entitlements from provisioning profile
+        [self generateEntitlementsFromProfile:fileNameOpened];
     }
 }
 
@@ -996,6 +1170,10 @@ static NSString *kiTunesMetadataFileName            = @"iTunesMetadata";
     {
         NSString* fileNameOpened = [[[openDlg URLs] objectAtIndex:0] path];
         [entitlementField setStringValue:fileNameOpened];
+        
+        // Save the path for next time
+        [defaults setValue:fileNameOpened forKey:@"ENTITLEMENT_PATH"];
+        [defaults synchronize];
     }
 }
 
@@ -1005,19 +1183,153 @@ static NSString *kiTunesMetadataFileName            = @"iTunesMetadata";
         return;
     }
     
-    bundleIDField.enabled = changeBundleIDCheckbox.state == NSOnState;
+    BOOL isEnabled = (changeBundleIDCheckbox.state == NSControlStateValueOn);
+    bundleIDField.enabled = isEnabled;
+    
+    // Save checkbox state immediately
+    [defaults setValue:[NSNumber numberWithBool:isEnabled] forKey:@"BUNDLE_ID_CHANGE_ENABLED"];
+    [defaults synchronize];
+    
+    NSLog(@"Bundle ID change %@", isEnabled ? @"enabled" : @"disabled");
+}
+
+- (void)generateEntitlementsFromProfile:(NSString *)profilePath {
+    if (!profilePath || [profilePath length] == 0) {
+        NSLog(@"No provisioning profile path provided");
+        return;
+    }
+    
+    NSLog(@"========================================");
+    NSLog(@"Auto-generating entitlements from profile...");
+    NSLog(@"Profile: %@", profilePath);
+    
+    // Use security command to extract profile data
+    NSTask *securityTask = [[NSTask alloc] init];
+    [securityTask setLaunchPath:@"/usr/bin/security"];
+    [securityTask setArguments:@[@"cms", @"-D", @"-i", profilePath]];
+    
+    NSPipe *pipe = [NSPipe pipe];
+    [securityTask setStandardOutput:pipe];
+    [securityTask setStandardError:pipe];
+    
+    @try {
+        [securityTask launch];
+        [securityTask waitUntilExit];
+        
+        NSData *profileData = [[pipe fileHandleForReading] readDataToEndOfFile];
+        
+        if ([securityTask terminationStatus] != 0) {
+            NSLog(@"✗ Failed to extract profile data");
+            return;
+        }
+        
+        // Parse the profile plist
+        NSError *error = nil;
+        NSDictionary *profileDict = [NSPropertyListSerialization propertyListWithData:profileData
+                                                                              options:NSPropertyListImmutable
+                                                                               format:nil
+                                                                                error:&error];
+        
+        if (error || !profileDict) {
+            NSLog(@"✗ Failed to parse profile data: %@", error);
+            return;
+        }
+        
+        // Extract entitlements
+        NSDictionary *entitlements = [profileDict objectForKey:@"Entitlements"];
+        
+        if (!entitlements) {
+            NSLog(@"✗ No Entitlements found in profile");
+            return;
+        }
+        
+        // Generate entitlements file path
+        NSString *profileDir = [profilePath stringByDeletingLastPathComponent];
+        NSString *profileName = [[profilePath lastPathComponent] stringByDeletingPathExtension];
+        NSString *entitlementsPath = [profileDir stringByAppendingPathComponent:
+                                     [NSString stringWithFormat:@"%@_entitlements.plist", profileName]];
+        
+        // Write entitlements to file
+        NSData *entitlementsData = [NSPropertyListSerialization dataWithPropertyList:entitlements
+                                                                             format:NSPropertyListXMLFormat_v1_0
+                                                                            options:0
+                                                                              error:&error];
+        
+        if (error || !entitlementsData) {
+            NSLog(@"✗ Failed to serialize entitlements: %@", error);
+            return;
+        }
+        
+        if ([entitlementsData writeToFile:entitlementsPath atomically:YES]) {
+            NSLog(@"✓ Generated entitlements file: %@", entitlementsPath);
+            
+            // Update the entitlements field
+            [entitlementField setStringValue:entitlementsPath];
+            
+            // Save to preferences
+            [defaults setValue:entitlementsPath forKey:@"ENTITLEMENT_PATH"];
+            [defaults synchronize];
+            
+            NSLog(@"✓ Auto-set entitlements field");
+            
+            // Show brief info about entitlements
+            NSString *appID = [entitlements objectForKey:@"application-identifier"];
+            NSString *teamID = [entitlements objectForKey:@"com.apple.developer.team-identifier"];
+            NSLog(@"  App ID: %@", appID);
+            NSLog(@"  Team ID: %@", teamID);
+        } else {
+            NSLog(@"✗ Failed to write entitlements file");
+        }
+        
+    } @catch (NSException *exception) {
+        NSLog(@"✗ Exception while generating entitlements: %@", exception);
+    }
+    
+    NSLog(@"========================================");
+}
+
+- (void)extensionBundleIDCheckboxChanged:(id)sender {
+    NSButton *checkbox = (NSButton *)sender;
+    
+    // Find the text field associated with this checkbox
+    // The checkbox is stored with key "<extensionName>_bundleid_checkbox"
+    // We need to find the corresponding text field with key "<extensionName>_bundleid"
+    
+    for (NSString *key in [extensionTextFields allKeys]) {
+        if ([key hasSuffix:@"_bundleid_checkbox"]) {
+            NSButton *storedCheckbox = [extensionTextFields objectForKey:key];
+            if (storedCheckbox == checkbox) {
+                // Found the checkbox, get the extension name
+                NSString *extensionName = [key stringByReplacingOccurrencesOfString:@"_bundleid_checkbox" withString:@""];
+                NSString *textFieldKey = [NSString stringWithFormat:@"%@_bundleid", extensionName];
+                NSTextField *textField = [extensionTextFields objectForKey:textFieldKey];
+                
+                if (textField) {
+                    [textField setEnabled:(checkbox.state == NSControlStateValueOn)];
+                    NSLog(@"Bundle ID text field for %@ %@", extensionName, checkbox.state == NSControlStateValueOn ? @"enabled" : @"disabled");
+                }
+                break;
+            }
+        }
+    }
 }
 
 - (IBAction)manageExtensions:(id)sender {
     if ([extensions count] == 0) {
         // Need to scan for extensions first - extract the IPA temporarily
         if (![[pathField stringValue] length]) {
-            [self showAlertOfKind:NSInformationalAlertStyle WithTitle:@"Info" AndMessage:@"Please select an IPA file first to detect extensions"];
+            [self showAlertOfKind:NSInformationalAlertStyle WithTitle:@"提示" AndMessage:@"请先选择一个 IPA 文件以检测扩展"];
             return;
         }
         
-        [self showAlertOfKind:NSInformationalAlertStyle WithTitle:@"Info" AndMessage:@"Extensions will be detected after you click ReSign. You can then manage their provisioning profiles during the signing process."];
-        return;
+        // Preview IPA to scan for extensions
+        [self previewIPAForExtensions];
+        
+        // Check again after preview
+        if ([extensions count] == 0) {
+            [self showAlertOfKind:NSInformationalAlertStyle WithTitle:@"提示" AndMessage:@"在此应用中未检测到任何扩展 (App Extensions)"];
+            return;
+        }
     }
     
     // Clear previous text fields
@@ -1025,63 +1337,158 @@ static NSString *kiTunesMetadataFileName            = @"iTunesMetadata";
     
     // Show dialog to manage extensions
     NSAlert *alert = [[NSAlert alloc] init];
-    [alert setMessageText:@"Manage Extension Provisioning Profiles"];
-    [alert setInformativeText:[NSString stringWithFormat:@"Found %lu extension(s). Configure provisioning profiles for each extension:", (unsigned long)[extensions count]]];
-    [alert addButtonWithTitle:@"OK"];
-    [alert addButtonWithTitle:@"Cancel"];
+    [alert setMessageText:@"管理扩展配置"];
+    [alert setInformativeText:[NSString stringWithFormat:@"检测到 %lu 个扩展。请为每个扩展配置 Provisioning Profile 和 Bundle ID：", (unsigned long)[extensions count]]];
+    [alert addButtonWithTitle:@"确定"];
+    [alert addButtonWithTitle:@"取消"];
     
-    NSView *accessoryView = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 400, [extensions count] * 50 + 20)];
-    NSInteger yPos = [extensions count] * 50;
+    // Increase height to accommodate Bundle ID checkbox (now 100 pixels per extension)
+    NSView *accessoryView = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 450, [extensions count] * 100 + 20)];
+    NSInteger yPos = [extensions count] * 100;
     
-    for (NSString *extensionPath in extensions) {
-        NSString *extensionName = [extensionPath lastPathComponent];
+    for (NSString *extension in extensions) {
+        // extension could be either a full path or just the name
+        NSString *extensionName = [extension lastPathComponent];
         
-        // Label
-        NSTextField *label = [[NSTextField alloc] initWithFrame:NSMakeRect(0, yPos - 20, 400, 20)];
+        // Extension name label
+        NSTextField *label = [[NSTextField alloc] initWithFrame:NSMakeRect(0, yPos - 20, 450, 20)];
         [label setStringValue:extensionName];
         [label setBezeled:NO];
         [label setDrawsBackground:NO];
         [label setEditable:NO];
         [label setSelectable:NO];
+        NSFont *boldFont = [NSFont boldSystemFontOfSize:[NSFont systemFontSize]];
+        [label setFont:boldFont];
         [accessoryView addSubview:label];
         
+        // Provisioning Profile label
+        NSTextField *provisioningLabel = [[NSTextField alloc] initWithFrame:NSMakeRect(0, yPos - 35, 120, 17)];
+        [provisioningLabel setStringValue:@"Provisioning:"];
+        [provisioningLabel setBezeled:NO];
+        [provisioningLabel setDrawsBackground:NO];
+        [provisioningLabel setEditable:NO];
+        [provisioningLabel setSelectable:NO];
+        [provisioningLabel setAlignment:NSTextAlignmentRight];
+        [accessoryView addSubview:provisioningLabel];
+        
         // Text field for provisioning profile path
-        NSTextField *textField = [[NSTextField alloc] initWithFrame:NSMakeRect(0, yPos - 45, 300, 22)];
-        NSString *existingPath = [extensionProvisioningProfiles objectForKey:extensionName];
-        if (existingPath && [existingPath length] > 0) {
-            [textField setStringValue:existingPath];
+        NSTextField *provisioningTextField = [[NSTextField alloc] initWithFrame:NSMakeRect(125, yPos - 38, 230, 22)];
+        NSString *existingProvisioningPath = [extensionProvisioningProfiles objectForKey:extensionName];
+        if (existingProvisioningPath && [existingProvisioningPath length] > 0) {
+            [provisioningTextField setStringValue:existingProvisioningPath];
         } else {
-            [textField setPlaceholderString:@"/path/to/.mobileprovision"];
+            [provisioningTextField setPlaceholderString:@"/path/to/.mobileprovision"];
         }
-        [accessoryView addSubview:textField];
-        [extensionTextFields setObject:textField forKey:extensionName];
+        [[provisioningTextField cell] setLineBreakMode:NSLineBreakByTruncatingHead];
+        [accessoryView addSubview:provisioningTextField];
         
-        // Browse button - use representedObject to store extension name
-        NSButton *browseBtn = [[NSButton alloc] initWithFrame:NSMakeRect(310, yPos - 45, 80, 25)];
-        [browseBtn setTitle:@"Browse"];
-        [browseBtn setBezelStyle:NSRoundedBezelStyle];
-        [browseBtn setTarget:self];
-        [browseBtn setAction:@selector(browseForExtensionProfile:)];
-        [browseBtn setIdentifier:extensionName]; // Use identifier to store extension name
-        [accessoryView addSubview:browseBtn];
+        // Store text field with key "<extensionName>_provisioning"
+        NSString *provisioningKey = [NSString stringWithFormat:@"%@_provisioning", extensionName];
+        [extensionTextFields setObject:provisioningTextField forKey:provisioningKey];
         
-        yPos -= 50;
+        // Browse button for provisioning
+        NSButton *provisioningBrowseBtn = [[NSButton alloc] initWithFrame:NSMakeRect(360, yPos - 38, 80, 25)];
+        [provisioningBrowseBtn setTitle:@"浏览"];
+        [provisioningBrowseBtn setBezelStyle:NSRoundedBezelStyle];
+        [provisioningBrowseBtn setTarget:self];
+        [provisioningBrowseBtn setAction:@selector(browseForExtensionProfile:)];
+        [provisioningBrowseBtn setIdentifier:extensionName];
+        [accessoryView addSubview:provisioningBrowseBtn];
+        
+        // Bundle ID checkbox
+        NSButton *bundleIDCheckbox = [[NSButton alloc] initWithFrame:NSMakeRect(0, yPos - 63, 120, 18)];
+        [bundleIDCheckbox setButtonType:NSSwitchButton];
+        [bundleIDCheckbox setTitle:@"修改 Bundle ID:"];
+        [bundleIDCheckbox setAlignment:NSTextAlignmentRight];
+        
+        // Check if there's an existing Bundle ID configuration
+        NSString *existingBundleID = [extensionBundleIDs objectForKey:extensionName];
+        if (existingBundleID && [existingBundleID length] > 0) {
+            [bundleIDCheckbox setState:NSControlStateValueOn];
+        } else {
+            [bundleIDCheckbox setState:NSControlStateValueOff];
+        }
+        
+        [accessoryView addSubview:bundleIDCheckbox];
+        
+        // Store checkbox with key "<extensionName>_bundleid_checkbox"
+        NSString *checkboxKey = [NSString stringWithFormat:@"%@_bundleid_checkbox", extensionName];
+        [extensionTextFields setObject:bundleIDCheckbox forKey:checkboxKey];
+        
+        // Text field for Bundle ID
+        NSTextField *bundleIDTextField = [[NSTextField alloc] initWithFrame:NSMakeRect(125, yPos - 66, 315, 22)];
+        if (existingBundleID && [existingBundleID length] > 0) {
+            [bundleIDTextField setStringValue:existingBundleID];
+            [bundleIDTextField setEnabled:YES];
+        } else {
+            [bundleIDTextField setPlaceholderString:@"com.company.app.extension"];
+            [bundleIDTextField setEnabled:NO];
+        }
+        [[bundleIDTextField cell] setLineBreakMode:NSLineBreakByTruncatingMiddle];
+        [accessoryView addSubview:bundleIDTextField];
+        
+        // Store text field with key "<extensionName>_bundleid"
+        NSString *bundleIDKey = [NSString stringWithFormat:@"%@_bundleid", extensionName];
+        [extensionTextFields setObject:bundleIDTextField forKey:bundleIDKey];
+        
+        // Set checkbox action to enable/disable text field
+        [bundleIDCheckbox setTarget:self];
+        [bundleIDCheckbox setAction:@selector(extensionBundleIDCheckboxChanged:)];
+        
+        yPos -= 100;
     }
     
     [alert setAccessoryView:accessoryView];
     
     NSModalResponse response = [alert runModal];
     if (response == NSAlertFirstButtonReturn) {
-        // Save the provisioning profile paths
-        for (NSString *extensionPath in extensions) {
-            NSString *extensionName = [extensionPath lastPathComponent];
-            NSTextField *textField = [extensionTextFields objectForKey:extensionName];
-            NSString *profilePath = [textField stringValue];
+        NSLog(@"========== Saving Extension Configurations ==========");
+        // Save the provisioning profile paths and bundle IDs
+        for (NSString *extension in extensions) {
+            NSString *extensionName = [extension lastPathComponent];
+            
+            NSLog(@"Processing extension config for: %@", extensionName);
+            
+            // Get provisioning profile path
+            NSString *provisioningKey = [NSString stringWithFormat:@"%@_provisioning", extensionName];
+            NSTextField *provisioningTextField = [extensionTextFields objectForKey:provisioningKey];
+            NSString *profilePath = [provisioningTextField stringValue];
             if (profilePath && [profilePath length] > 0) {
                 [extensionProvisioningProfiles setObject:profilePath forKey:extensionName];
-                NSLog(@"Saved provisioning profile for %@: %@", extensionName, profilePath);
+                NSLog(@"  ✓ Saved provisioning profile: %@ -> %@", extensionName, profilePath);
+            } else {
+                NSLog(@"  ⚠ No provisioning profile specified for: %@", extensionName);
+            }
+            
+            // Get Bundle ID checkbox state and value
+            NSString *checkboxKey = [NSString stringWithFormat:@"%@_bundleid_checkbox", extensionName];
+            NSButton *bundleIDCheckbox = [extensionTextFields objectForKey:checkboxKey];
+            
+            if ([bundleIDCheckbox state] == NSControlStateValueOn) {
+                NSString *bundleIDKey = [NSString stringWithFormat:@"%@_bundleid", extensionName];
+                NSTextField *bundleIDTextField = [extensionTextFields objectForKey:bundleIDKey];
+                NSString *bundleID = [bundleIDTextField stringValue];
+                if (bundleID && [bundleID length] > 0) {
+                    [extensionBundleIDs setObject:bundleID forKey:extensionName];
+                    NSLog(@"  ✓ Saved Bundle ID: %@ -> %@", extensionName, bundleID);
+                } else {
+                    NSLog(@"  ⚠ Bundle ID checkbox enabled but no Bundle ID specified for: %@", extensionName);
+                }
+            } else {
+                // Checkbox not checked, remove any existing Bundle ID configuration
+                [extensionBundleIDs removeObjectForKey:extensionName];
+                NSLog(@"  ⊘ Bundle ID modification disabled for: %@", extensionName);
             }
         }
+        
+        // Save to NSUserDefaults for next time
+        [defaults setObject:extensionProvisioningProfiles forKey:@"EXTENSION_PROVISIONING_PROFILES"];
+        [defaults setObject:extensionBundleIDs forKey:@"EXTENSION_BUNDLE_IDS"];
+        [defaults synchronize];
+        NSLog(@"Extension configurations saved to preferences");
+        NSLog(@"Final provisioning profiles dict: %@", extensionProvisioningProfiles);
+        NSLog(@"Final Bundle IDs dict: %@", extensionBundleIDs);
+        NSLog(@"====================================================");
     }
     
     // Clear text fields dictionary after use
@@ -1108,15 +1515,126 @@ static NSString *kiTunesMetadataFileName            = @"iTunesMetadata";
     if ([openDlg runModal] == NSOKButton) {
         NSString* fileNameOpened = [[[openDlg URLs] objectAtIndex:0] path];
         
-        // Find the text field for this extension
-        NSTextField *textField = [extensionTextFields objectForKey:extensionName];
+        // Find the text field for this extension using the correct key format
+        NSString *provisioningKey = [NSString stringWithFormat:@"%@_provisioning", extensionName];
+        NSTextField *textField = [extensionTextFields objectForKey:provisioningKey];
         if (textField) {
             [textField setStringValue:fileNameOpened];
-            NSLog(@"Updated text field for %@ with path: %@", extensionName, fileNameOpened);
+            NSLog(@"✓ Updated provisioning text field for %@ with path: %@", extensionName, fileNameOpened);
         } else {
-            NSLog(@"Error: Text field not found for extension: %@", extensionName);
+            NSLog(@"✗ Error: Text field not found for extension: %@ (key: %@)", extensionName, provisioningKey);
+            NSLog(@"Available keys in extensionTextFields: %@", [extensionTextFields allKeys]);
         }
     }
+}
+
+- (void)previewIPAForExtensions {
+    NSString *ipaPath = [pathField stringValue];
+    
+    if (!ipaPath || [ipaPath length] == 0) {
+        return;
+    }
+    
+    // Check if file exists and is an IPA or xcarchive
+    if (![[[ipaPath pathExtension] lowercaseString] isEqualToString:@"ipa"] &&
+        ![[[ipaPath pathExtension] lowercaseString] isEqualToString:@"xcarchive"]) {
+        [self showAlertOfKind:NSWarningAlertStyle WithTitle:@"错误" AndMessage:@"请选择有效的 .ipa 或 .xcarchive 文件"];
+        return;
+    }
+    
+    if (![[NSFileManager defaultManager] fileExistsAtPath:ipaPath]) {
+        [self showAlertOfKind:NSWarningAlertStyle WithTitle:@"错误" AndMessage:@"选定的文件不存在"];
+        return;
+    }
+    
+    NSLog(@"Preview IPA for extensions: %@", ipaPath);
+    
+    // Create temporary preview directory
+    NSString *previewPath = [NSTemporaryDirectory() stringByAppendingPathComponent:@"com.appulize.iresign.preview"];
+    [[NSFileManager defaultManager] removeItemAtPath:previewPath error:nil];
+    [[NSFileManager defaultManager] createDirectoryAtPath:previewPath withIntermediateDirectories:TRUE attributes:nil error:nil];
+    
+    if ([[[ipaPath pathExtension] lowercaseString] isEqualToString:@"ipa"]) {
+        // Unzip IPA
+        NSTask *unzipTask = [[NSTask alloc] init];
+        [unzipTask setLaunchPath:@"/usr/bin/unzip"];
+        [unzipTask setArguments:[NSArray arrayWithObjects:@"-q", ipaPath, @"-d", previewPath, nil]];
+        [unzipTask launch];
+        [unzipTask waitUntilExit];
+        
+        if ([unzipTask terminationStatus] != 0) {
+            NSLog(@"Failed to unzip IPA for preview");
+            [[NSFileManager defaultManager] removeItemAtPath:previewPath error:nil];
+            [self showAlertOfKind:NSWarningAlertStyle WithTitle:@"错误" AndMessage:@"无法解压 IPA 文件进行预览"];
+            return;
+        }
+    } else {
+        // Handle xcarchive
+        NSString* payloadPath = [previewPath stringByAppendingPathComponent:kPayloadDirName];
+        [[NSFileManager defaultManager] createDirectoryAtPath:payloadPath withIntermediateDirectories:TRUE attributes:nil error:nil];
+        
+        NSString* infoPListPath = [ipaPath stringByAppendingPathComponent:kInfoPlistFilename];
+        NSDictionary* infoPListDict = [NSDictionary dictionaryWithContentsOfFile:infoPListPath];
+        
+        if (infoPListDict != nil) {
+            NSString* applicationPath = nil;
+            NSDictionary* applicationPropertiesDict = [infoPListDict objectForKey:kKeyInfoPlistApplicationProperties];
+            
+            if (applicationPropertiesDict != nil) {
+                applicationPath = [applicationPropertiesDict objectForKey:kKeyInfoPlistApplicationPath];
+            }
+            
+            if (applicationPath != nil) {
+                applicationPath = [[ipaPath stringByAppendingPathComponent:kProductsDirName] stringByAppendingPathComponent:applicationPath];
+                
+                NSTask *copyTask = [[NSTask alloc] init];
+                [copyTask setLaunchPath:@"/bin/cp"];
+                [copyTask setArguments:[NSArray arrayWithObjects:@"-r", applicationPath, payloadPath, nil]];
+                [copyTask launch];
+                [copyTask waitUntilExit];
+                
+                if ([copyTask terminationStatus] != 0) {
+                    NSLog(@"Failed to copy xcarchive for preview");
+                    [[NSFileManager defaultManager] removeItemAtPath:previewPath error:nil];
+                    [self showAlertOfKind:NSWarningAlertStyle WithTitle:@"错误" AndMessage:@"无法复制 xcarchive 文件进行预览"];
+                    return;
+                }
+            }
+        }
+    }
+    
+    // Find app path and scan for extensions
+    NSString *payloadPath = [previewPath stringByAppendingPathComponent:kPayloadDirName];
+    NSArray *dirContents = [[NSFileManager defaultManager] contentsOfDirectoryAtPath:payloadPath error:nil];
+    
+    for (NSString *file in dirContents) {
+        if ([[[file pathExtension] lowercaseString] isEqualToString:@"app"]) {
+            NSString *tempAppPath = [payloadPath stringByAppendingPathComponent:file];
+            
+            // Scan for extensions
+            [extensions removeAllObjects];
+            [extensionEntitlements removeAllObjects];
+            
+            NSString *plugInsPath = [tempAppPath stringByAppendingPathComponent:@"PlugIns"];
+            if ([[NSFileManager defaultManager] fileExistsAtPath:plugInsPath]) {
+                NSArray *plugInContents = [[NSFileManager defaultManager] contentsOfDirectoryAtPath:plugInsPath error:nil];
+                for (NSString *plugInFile in plugInContents) {
+                    if ([[[plugInFile pathExtension] lowercaseString] isEqualToString:@"appex"]) {
+                        // Store just the extension name, the actual path will be determined during resign
+                        [extensions addObject:plugInFile];
+                        NSLog(@"Found extension during preview: %@", plugInFile);
+                    }
+                }
+            }
+            
+            break;
+        }
+    }
+    
+    // Clean up preview directory
+    [[NSFileManager defaultManager] removeItemAtPath:previewPath error:nil];
+    
+    NSLog(@"Preview complete. Found %lu extension(s)", (unsigned long)[extensions count]);
 }
 
 - (void)disableControls {

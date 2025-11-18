@@ -42,6 +42,7 @@
     NSMutableDictionary *extensionProvisioningProfiles;
     NSMutableDictionary *extensionTextFields; // For managing extension dialog text fields
     NSMutableDictionary *extensionEntitlements; // Store entitlements path for each extension
+    NSMutableDictionary *extensionBundleIDs; // Store bundle ID for each extension
     
     IBOutlet IRTextFieldDrag *pathField;
     IBOutlet IRTextFieldDrag *provisioningPathField;
@@ -74,6 +75,7 @@
 - (IBAction)entitlementBrowse:(id)sender;
 - (IBAction)changeBundleIDPressed:(id)sender;
 - (IBAction)manageExtensions:(id)sender;
+- (void)previewIPAForExtensions;
 
 - (void)checkUnzip:(NSTimer *)timer;
 - (void)checkCopy:(NSTimer *)timer;
