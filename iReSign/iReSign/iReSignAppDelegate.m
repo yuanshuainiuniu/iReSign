@@ -31,6 +31,12 @@ static NSString *kiTunesMetadataFileName            = @"iTunesMetadata";
     
     defaults = [NSUserDefaults standardUserDefaults];
     
+    // Initialize extensions data structures
+    extensions = [[NSMutableArray alloc] init];
+    extensionProvisioningProfiles = [[NSMutableDictionary alloc] init];
+    extensionTextFields = [[NSMutableDictionary alloc] init];
+    extensionEntitlements = [[NSMutableDictionary alloc] init];
+    
     // Look up available signing certificates
     [self getCerts];
     
@@ -167,14 +173,47 @@ static NSString *kiTunesMetadataFileName            = @"iTunesMetadata";
             NSLog(@"Unzipping done");
             [statusLabel setStringValue:@"Original app extracted"];
             
+            // Find app path and scan for extensions early
+            NSArray *dirContents = [[NSFileManager defaultManager] contentsOfDirectoryAtPath:[workingPath stringByAppendingPathComponent:kPayloadDirName] error:nil];
+            for (NSString *file in dirContents) {
+                if ([[[file pathExtension] lowercaseString] isEqualToString:@"app"]) {
+                    appPath = [[workingPath stringByAppendingPathComponent:kPayloadDirName] stringByAppendingPathComponent:file];
+                    [self scanForExtensions];
+                    break;
+                }
+            }
+            
+            // If extensions found, prompt user to configure them
+            if ([extensions count] > 0) {
+                NSAlert *alert = [[NSAlert alloc] init];
+                [alert setMessageText:@"Extensions Detected"];
+                [alert setInformativeText:[NSString stringWithFormat:@"Found %lu extension(s) in the app. Do you want to configure provisioning profiles for them now?", (unsigned long)[extensions count]]];
+                [alert addButtonWithTitle:@"Configure"];
+                [alert addButtonWithTitle:@"Skip"];
+                
+                NSModalResponse response = [alert runModal];
+                if (response == NSAlertFirstButtonReturn) {
+                    [self manageExtensions:nil];
+                }
+            }
+            
             if (changeBundleIDCheckbox.state == NSOnState) {
                 [self doBundleIDChange:bundleIDField.stringValue];
             }
             
-            if ([[provisioningPathField stringValue] isEqualTo:@""]) {
-                [self doCodeSigning];
-            } else {
+            // Check if we need to do provisioning (main app or extensions)
+            BOOL hasMainProvisioning = ![[provisioningPathField stringValue] isEqualTo:@""];
+            BOOL hasExtensionProvisioning = [extensions count] > 0;
+            
+            if (hasMainProvisioning) {
+                // Do main app provisioning first, which will handle extensions too
                 [self doProvisioning];
+            } else if (hasExtensionProvisioning) {
+                // No main app provisioning, but we have extensions to provision
+                [self doExtensionsProvisioning];
+            } else {
+                // No provisioning at all, go straight to code signing
+                [self doCodeSigning];
             }
         } else {
             [self showAlertOfKind:NSCriticalAlertStyle WithTitle:@"Error" AndMessage:@"Unzip failed"];
@@ -192,14 +231,47 @@ static NSString *kiTunesMetadataFileName            = @"iTunesMetadata";
         NSLog(@"Copy done");
         [statusLabel setStringValue:@".xcarchive app copied"];
         
+        // Find app path and scan for extensions early
+        NSArray *dirContents = [[NSFileManager defaultManager] contentsOfDirectoryAtPath:[workingPath stringByAppendingPathComponent:kPayloadDirName] error:nil];
+        for (NSString *file in dirContents) {
+            if ([[[file pathExtension] lowercaseString] isEqualToString:@"app"]) {
+                appPath = [[workingPath stringByAppendingPathComponent:kPayloadDirName] stringByAppendingPathComponent:file];
+                [self scanForExtensions];
+                break;
+            }
+        }
+        
+        // If extensions found, prompt user to configure them
+        if ([extensions count] > 0) {
+            NSAlert *alert = [[NSAlert alloc] init];
+            [alert setMessageText:@"Extensions Detected"];
+            [alert setInformativeText:[NSString stringWithFormat:@"Found %lu extension(s) in the app. Do you want to configure provisioning profiles for them now?", (unsigned long)[extensions count]]];
+            [alert addButtonWithTitle:@"Configure"];
+            [alert addButtonWithTitle:@"Skip"];
+            
+            NSModalResponse response = [alert runModal];
+            if (response == NSAlertFirstButtonReturn) {
+                [self manageExtensions:nil];
+            }
+        }
+        
         if (changeBundleIDCheckbox.state == NSOnState) {
             [self doBundleIDChange:bundleIDField.stringValue];
         }
         
-        if ([[provisioningPathField stringValue] isEqualTo:@""]) {
-            [self doCodeSigning];
-        } else {
+        // Check if we need to do provisioning (main app or extensions)
+        BOOL hasMainProvisioning = ![[provisioningPathField stringValue] isEqualTo:@""];
+        BOOL hasExtensionProvisioning = [extensions count] > 0;
+        
+        if (hasMainProvisioning) {
+            // Do main app provisioning first, which will handle extensions too
             [self doProvisioning];
+        } else if (hasExtensionProvisioning) {
+            // No main app provisioning, but we have extensions to provision
+            [self doExtensionsProvisioning];
+        } else {
+            // No provisioning at all, go straight to code signing
+            [self doCodeSigning];
         }
     }
 }
@@ -263,6 +335,28 @@ static NSString *kiTunesMetadataFileName            = @"iTunesMetadata";
 }
 
 
+- (void)scanForExtensions {
+    // Scan for extensions in the app bundle
+    [extensions removeAllObjects];
+    [extensionEntitlements removeAllObjects];
+    
+    NSString *plugInsPath = [appPath stringByAppendingPathComponent:@"PlugIns"];
+    if ([[NSFileManager defaultManager] fileExistsAtPath:plugInsPath]) {
+        NSArray *plugInContents = [[NSFileManager defaultManager] contentsOfDirectoryAtPath:plugInsPath error:nil];
+        for (NSString *plugInFile in plugInContents) {
+            if ([[[plugInFile pathExtension] lowercaseString] isEqualToString:@"appex"]) {
+                NSString *extensionPath = [plugInsPath stringByAppendingPathComponent:plugInFile];
+                [extensions addObject:extensionPath];
+                NSLog(@"Found extension: %@", plugInFile);
+            }
+        }
+    }
+    
+    if ([extensions count] > 0) {
+        NSLog(@"Found %lu extension(s)", (unsigned long)[extensions count]);
+    }
+}
+
 - (void)doProvisioning {
     NSArray *dirContents = [[NSFileManager defaultManager] contentsOfDirectoryAtPath:[workingPath stringByAppendingPathComponent:kPayloadDirName] error:nil];
     
@@ -276,6 +370,9 @@ static NSString *kiTunesMetadataFileName            = @"iTunesMetadata";
             break;
         }
     }
+    
+    // Scan for extensions after finding the app path
+    [self scanForExtensions];
     
     NSString *targetPath = [appPath stringByAppendingPathComponent:@"embedded.mobileprovision"];
     
@@ -347,7 +444,7 @@ static NSString *kiTunesMetadataFileName            = @"iTunesMetadata";
                     if (identifierOK) {
                         NSLog(@"Provisioning completed.");
                         [statusLabel setStringValue:@"Provisioning completed"];
-                        [self doEntitlementsFixing];
+                        [self doExtensionsProvisioning];
                     } else {
                         [self showAlertOfKind:NSCriticalAlertStyle WithTitle:@"Error" AndMessage:@"Product identifiers don't match"];
                         [self enableControls];
@@ -361,6 +458,162 @@ static NSString *kiTunesMetadataFileName            = @"iTunesMetadata";
                 break;
             }
         }
+    }
+}
+
+- (void)doExtensionsProvisioning {
+    // Process provisioning profiles for extensions
+    if ([extensions count] == 0) {
+        NSLog(@"No extensions found, skipping extensions provisioning");
+        [self doEntitlementsFixing];
+        return;
+    }
+    
+    NSLog(@"Processing provisioning for %lu extension(s)", (unsigned long)[extensions count]);
+    NSLog(@"Extension provisioning profiles dictionary: %@", extensionProvisioningProfiles);
+    
+    BOOL hasErrors = NO;
+    NSInteger processedCount = 0;
+    
+    for (NSString *extensionPath in extensions) {
+        NSString *extensionName = [extensionPath lastPathComponent];
+        NSString *provisioningPath = [extensionProvisioningProfiles objectForKey:extensionName];
+        
+        NSLog(@"Processing extension: %@", extensionName);
+        NSLog(@"Extension path: %@", extensionPath);
+        NSLog(@"Provisioning profile path: %@", provisioningPath);
+        
+        if (provisioningPath && [provisioningPath length] > 0) {
+            // Verify source file exists
+            if (![[NSFileManager defaultManager] fileExistsAtPath:provisioningPath]) {
+                NSLog(@"ERROR: Source provisioning profile does not exist: %@", provisioningPath);
+                [self showAlertOfKind:NSWarningAlertStyle 
+                            WithTitle:@"Warning" 
+                           AndMessage:[NSString stringWithFormat:@"Provisioning profile not found for %@:\n%@", extensionName, provisioningPath]];
+                hasErrors = YES;
+                continue;
+            }
+            
+            // Verify extension directory exists
+            if (![[NSFileManager defaultManager] fileExistsAtPath:extensionPath]) {
+                NSLog(@"ERROR: Extension directory does not exist: %@", extensionPath);
+                hasErrors = YES;
+                continue;
+            }
+            
+            NSString *embeddedProvisionPath = [extensionPath stringByAppendingPathComponent:@"embedded.mobileprovision"];
+            
+            // Remove old embedded.mobileprovision if exists
+            if ([[NSFileManager defaultManager] fileExistsAtPath:embeddedProvisionPath]) {
+                NSError *removeError = nil;
+                [[NSFileManager defaultManager] removeItemAtPath:embeddedProvisionPath error:&removeError];
+                if (removeError) {
+                    NSLog(@"Warning: Failed to remove old provisioning profile: %@", removeError);
+                } else {
+                    NSLog(@"Removed old provisioning profile at: %@", embeddedProvisionPath);
+                }
+            }
+            
+            // Copy new provisioning profile
+            NSError *error = nil;
+            BOOL success = [[NSFileManager defaultManager] copyItemAtPath:provisioningPath 
+                                                                   toPath:embeddedProvisionPath 
+                                                                    error:&error];
+            
+            if (error || !success) {
+                NSLog(@"ERROR: Failed to copy provisioning profile for extension %@: %@", extensionName, error);
+                [self showAlertOfKind:NSWarningAlertStyle 
+                            WithTitle:@"Warning" 
+                           AndMessage:[NSString stringWithFormat:@"Failed to copy provisioning profile for %@:\n%@", extensionName, error.localizedDescription]];
+                hasErrors = YES;
+            } else {
+                // Verify the file was actually copied
+                if ([[NSFileManager defaultManager] fileExistsAtPath:embeddedProvisionPath]) {
+                    NSLog(@"✓ Successfully copied provisioning profile for extension: %@", extensionName);
+                    NSLog(@"  Destination: %@", embeddedProvisionPath);
+                    
+                    // Generate entitlements for this extension
+                    [self generateEntitlementsForExtension:extensionName 
+                                        withProvisioningPath:provisioningPath];
+                    
+                    processedCount++;
+                } else {
+                    NSLog(@"ERROR: File copy reported success but file doesn't exist at: %@", embeddedProvisionPath);
+                    hasErrors = YES;
+                }
+            }
+        } else {
+            NSLog(@"No provisioning profile configured for extension: %@ (keeping original)", extensionName);
+            
+            // Try to generate entitlements from existing embedded.mobileprovision
+            NSString *embeddedProvisionPath = [extensionPath stringByAppendingPathComponent:@"embedded.mobileprovision"];
+            if ([[NSFileManager defaultManager] fileExistsAtPath:embeddedProvisionPath]) {
+                NSLog(@"Generating entitlements from existing provisioning profile for %@", extensionName);
+                [self generateEntitlementsForExtension:extensionName withProvisioningPath:embeddedProvisionPath];
+            }
+        }
+    }
+    
+    NSLog(@"Extension provisioning completed: %ld/%lu extensions processed", (long)processedCount, (unsigned long)[extensions count]);
+    
+    if (hasErrors) {
+        [statusLabel setStringValue:@"Extensions provisioning completed with warnings"];
+    } else {
+        [statusLabel setStringValue:@"Extensions provisioning completed"];
+    }
+    
+    [self doEntitlementsFixing];
+}
+
+- (void)generateEntitlementsForExtension:(NSString *)extensionName withProvisioningPath:(NSString *)provisioningPath {
+    if (!provisioningPath || [provisioningPath length] == 0) {
+        NSLog(@"No provisioning path for extension %@, skipping entitlements generation", extensionName);
+        return;
+    }
+    
+    NSLog(@"Generating entitlements for extension: %@", extensionName);
+    
+    // Use security command to extract entitlements from provisioning profile
+    NSTask *task = [[NSTask alloc] init];
+    [task setLaunchPath:@"/usr/bin/security"];
+    [task setArguments:@[@"cms", @"-D", @"-i", provisioningPath]];
+    
+    NSPipe *pipe = [NSPipe pipe];
+    [task setStandardOutput:pipe];
+    [task setStandardError:pipe];
+    NSFileHandle *handle = [pipe fileHandleForReading];
+    
+    [task launch];
+    [task waitUntilExit];
+    
+    NSData *data = [handle readDataToEndOfFile];
+    NSString *result = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+    
+    if ([task terminationStatus] == 0 && result && [result length] > 0) {
+        NSDictionary *profileDict = result.propertyList;
+        NSDictionary *entitlements = profileDict[@"Entitlements"];
+        
+        if (entitlements) {
+            // Save entitlements to a file
+            NSString *entitlementsFileName = [NSString stringWithFormat:@"entitlements_%@.plist", 
+                                            [extensionName stringByReplacingOccurrencesOfString:@".appex" withString:@""]];
+            NSString *entitlementsPath = [workingPath stringByAppendingPathComponent:entitlementsFileName];
+            
+            NSData *xmlData = [NSPropertyListSerialization dataWithPropertyList:entitlements 
+                                                                         format:NSPropertyListXMLFormat_v1_0 
+                                                                        options:kCFPropertyListImmutable 
+                                                                          error:nil];
+            if ([xmlData writeToFile:entitlementsPath atomically:YES]) {
+                [extensionEntitlements setObject:entitlementsPath forKey:extensionName];
+                NSLog(@"✓ Generated entitlements for %@: %@", extensionName, entitlementsPath);
+            } else {
+                NSLog(@"ERROR: Failed to write entitlements file for %@", extensionName);
+            }
+        } else {
+            NSLog(@"WARNING: No entitlements found in provisioning profile for %@", extensionName);
+        }
+    } else {
+        NSLog(@"ERROR: Failed to extract entitlements from provisioning profile for %@", extensionName);
     }
 }
 
@@ -441,6 +694,31 @@ static NSString *kiTunesMetadataFileName            = @"iTunesMetadata";
             frameworksDirPath = [appPath stringByAppendingPathComponent:kFrameworksDirName];
             NSLog(@"Found %@",appPath);
             appName = file;
+            
+            // Scan for extensions if not already scanned
+            if ([extensions count] == 0) {
+                [self scanForExtensions];
+            }
+            
+            // Add extensions and their frameworks to the signing queue
+            for (NSString *extensionPath in extensions) {
+                NSString *extensionFrameworksPath = [extensionPath stringByAppendingPathComponent:kFrameworksDirName];
+                if ([[NSFileManager defaultManager] fileExistsAtPath:extensionFrameworksPath]) {
+                    NSArray *extensionFrameworks = [[NSFileManager defaultManager] contentsOfDirectoryAtPath:extensionFrameworksPath error:nil];
+                    for (NSString *frameworkFile in extensionFrameworks) {
+                        NSString *extension = [[frameworkFile pathExtension] lowercaseString];
+                        if ([extension isEqualTo:@"framework"] || [extension isEqualTo:@"dylib"]) {
+                            NSString *fwPath = [extensionFrameworksPath stringByAppendingPathComponent:frameworkFile];
+                            NSLog(@"Found extension framework: %@", fwPath);
+                            [frameworks addObject:fwPath];
+                        }
+                    }
+                }
+                // Add the extension itself to be signed
+                [frameworks addObject:extensionPath];
+            }
+            
+            // Add main app frameworks
             if ([[NSFileManager defaultManager] fileExistsAtPath:frameworksDirPath]) {
                 NSLog(@"Found %@",frameworksDirPath);
                 hasFrameworks = YES;
@@ -454,13 +732,14 @@ static NSString *kiTunesMetadataFileName            = @"iTunesMetadata";
                     }
                 }
             }
+            
             [statusLabel setStringValue:[NSString stringWithFormat:@"Codesigning %@",file]];
             break;
         }
     }
     
     if (appPath) {
-        if (hasFrameworks) {
+        if ([frameworks count] > 0 || hasFrameworks) {
             [self signFile:[frameworks lastObject]];
             [frameworks removeLastObject];
         } else {
@@ -503,8 +782,31 @@ static NSString *kiTunesMetadataFileName            = @"iTunesMetadata";
         [arguments addObject:@"--no-strict"]; // http://stackoverflow.com/a/26204757
     }
     
-    if (![[entitlementField stringValue] isEqualToString:@""]) {
-        [arguments addObject:[NSString stringWithFormat:@"--entitlements=%@", [entitlementField stringValue]]];
+    // Check if this is an extension and use its entitlements if available
+    NSString *entitlementsPath = nil;
+    BOOL isExtension = [[filePath pathExtension] isEqualToString:@"appex"];
+    
+    if (isExtension) {
+        // This is an extension, check if we have custom entitlements for it
+        NSString *extensionName = [filePath lastPathComponent];
+        entitlementsPath = [extensionEntitlements objectForKey:extensionName];
+        
+        if (entitlementsPath && [entitlementsPath length] > 0) {
+            NSLog(@"Using custom entitlements for extension %@: %@", extensionName, entitlementsPath);
+        } else {
+            NSLog(@"No custom entitlements for extension %@, will use embedded entitlements", extensionName);
+        }
+    } else {
+        // This is not an extension, use main app entitlements
+        if (![[entitlementField stringValue] isEqualToString:@""]) {
+            entitlementsPath = [entitlementField stringValue];
+        }
+    }
+    
+    // Add entitlements argument if we have a path
+    if (entitlementsPath && [entitlementsPath length] > 0) {
+        [arguments addObject:[NSString stringWithFormat:@"--entitlements=%@", entitlementsPath]];
+        NSLog(@"Adding entitlements argument: %@", entitlementsPath);
     }
     
     [arguments addObjectsFromArray:[NSArray arrayWithObjects:filePath, nil]];
@@ -704,6 +1006,117 @@ static NSString *kiTunesMetadataFileName            = @"iTunesMetadata";
     }
     
     bundleIDField.enabled = changeBundleIDCheckbox.state == NSOnState;
+}
+
+- (IBAction)manageExtensions:(id)sender {
+    if ([extensions count] == 0) {
+        // Need to scan for extensions first - extract the IPA temporarily
+        if (![[pathField stringValue] length]) {
+            [self showAlertOfKind:NSInformationalAlertStyle WithTitle:@"Info" AndMessage:@"Please select an IPA file first to detect extensions"];
+            return;
+        }
+        
+        [self showAlertOfKind:NSInformationalAlertStyle WithTitle:@"Info" AndMessage:@"Extensions will be detected after you click ReSign. You can then manage their provisioning profiles during the signing process."];
+        return;
+    }
+    
+    // Clear previous text fields
+    [extensionTextFields removeAllObjects];
+    
+    // Show dialog to manage extensions
+    NSAlert *alert = [[NSAlert alloc] init];
+    [alert setMessageText:@"Manage Extension Provisioning Profiles"];
+    [alert setInformativeText:[NSString stringWithFormat:@"Found %lu extension(s). Configure provisioning profiles for each extension:", (unsigned long)[extensions count]]];
+    [alert addButtonWithTitle:@"OK"];
+    [alert addButtonWithTitle:@"Cancel"];
+    
+    NSView *accessoryView = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 400, [extensions count] * 50 + 20)];
+    NSInteger yPos = [extensions count] * 50;
+    
+    for (NSString *extensionPath in extensions) {
+        NSString *extensionName = [extensionPath lastPathComponent];
+        
+        // Label
+        NSTextField *label = [[NSTextField alloc] initWithFrame:NSMakeRect(0, yPos - 20, 400, 20)];
+        [label setStringValue:extensionName];
+        [label setBezeled:NO];
+        [label setDrawsBackground:NO];
+        [label setEditable:NO];
+        [label setSelectable:NO];
+        [accessoryView addSubview:label];
+        
+        // Text field for provisioning profile path
+        NSTextField *textField = [[NSTextField alloc] initWithFrame:NSMakeRect(0, yPos - 45, 300, 22)];
+        NSString *existingPath = [extensionProvisioningProfiles objectForKey:extensionName];
+        if (existingPath && [existingPath length] > 0) {
+            [textField setStringValue:existingPath];
+        } else {
+            [textField setPlaceholderString:@"/path/to/.mobileprovision"];
+        }
+        [accessoryView addSubview:textField];
+        [extensionTextFields setObject:textField forKey:extensionName];
+        
+        // Browse button - use representedObject to store extension name
+        NSButton *browseBtn = [[NSButton alloc] initWithFrame:NSMakeRect(310, yPos - 45, 80, 25)];
+        [browseBtn setTitle:@"Browse"];
+        [browseBtn setBezelStyle:NSRoundedBezelStyle];
+        [browseBtn setTarget:self];
+        [browseBtn setAction:@selector(browseForExtensionProfile:)];
+        [browseBtn setIdentifier:extensionName]; // Use identifier to store extension name
+        [accessoryView addSubview:browseBtn];
+        
+        yPos -= 50;
+    }
+    
+    [alert setAccessoryView:accessoryView];
+    
+    NSModalResponse response = [alert runModal];
+    if (response == NSAlertFirstButtonReturn) {
+        // Save the provisioning profile paths
+        for (NSString *extensionPath in extensions) {
+            NSString *extensionName = [extensionPath lastPathComponent];
+            NSTextField *textField = [extensionTextFields objectForKey:extensionName];
+            NSString *profilePath = [textField stringValue];
+            if (profilePath && [profilePath length] > 0) {
+                [extensionProvisioningProfiles setObject:profilePath forKey:extensionName];
+                NSLog(@"Saved provisioning profile for %@: %@", extensionName, profilePath);
+            }
+        }
+    }
+    
+    // Clear text fields dictionary after use
+    [extensionTextFields removeAllObjects];
+}
+
+- (void)browseForExtensionProfile:(id)sender {
+    NSButton *button = (NSButton *)sender;
+    NSString *extensionName = [button identifier];
+    
+    if (!extensionName || [extensionName length] == 0) {
+        NSLog(@"Error: No extension name found for browse button");
+        return;
+    }
+    
+    NSOpenPanel* openDlg = [NSOpenPanel openPanel];
+    
+    [openDlg setCanChooseFiles:TRUE];
+    [openDlg setCanChooseDirectories:FALSE];
+    [openDlg setAllowsMultipleSelection:FALSE];
+    [openDlg setAllowsOtherFileTypes:FALSE];
+    [openDlg setAllowedFileTypes:@[@"mobileprovision", @"MOBILEPROVISION"]];
+    
+    if ([openDlg runModal] == NSOKButton) {
+        NSString* fileNameOpened = [[[openDlg URLs] objectAtIndex:0] path];
+        
+        // Find the text field for this extension
+        NSTextField *textField = [extensionTextFields objectForKey:extensionName];
+        if (textField) {
+            [textField setStringValue:fileNameOpened];
+            NSLog(@"Updated text field for %@ with path: %@", extensionName, fileNameOpened);
+        } else {
+            NSLog(@"Error: Text field not found for extension: %@", extensionName);
+        }
+    }
 }
 
 - (void)disableControls {

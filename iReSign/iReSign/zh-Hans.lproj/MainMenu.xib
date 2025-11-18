@@ -155,6 +155,17 @@
                             <outlet property="nextKeyView" destination="572" id="610"/>
                         </connections>
                     </button>
+                    <button verticalHuggingPriority="750" id="700">
+                        <rect key="frame" x="20" y="5" width="140" height="32"/>
+                        <autoresizingMask key="autoresizingMask" flexibleMaxX="YES" flexibleMaxY="YES"/>
+                        <buttonCell key="cell" type="push" title="管理扩展配置" bezelStyle="rounded" alignment="center" borderStyle="border" imageScaling="proportionallyDown" inset="2" id="701">
+                            <behavior key="behavior" pushIn="YES" lightByBackground="YES" lightByGray="YES"/>
+                            <font key="font" size="13" name="STHeitiSC-Light"/>
+                        </buttonCell>
+                        <connections>
+                            <action selector="manageExtensions:" target="494" id="702"/>
+                        </connections>
+                    </button>
                     <button verticalHuggingPriority="750" id="539">
                         <rect key="frame" x="230" y="5" width="96" height="32"/>
                         <autoresizingMask key="autoresizingMask" flexibleMinX="YES" flexibleMaxY="YES"/>
@@ -232,6 +243,7 @@
                 <outlet property="entitlementBrowseButton" destination="595" id="607"/>
                 <outlet property="entitlementField" destination="543" id="608"/>
                 <outlet property="flurry" destination="557" id="562"/>
+                <outlet property="manageExtensionsButton" destination="700" id="703"/>
                 <outlet property="pathField" destination="533" id="548"/>
                 <outlet property="provisioningBrowseButton" destination="564" id="570"/>
                 <outlet property="provisioningPathField" destination="563" id="569"/>

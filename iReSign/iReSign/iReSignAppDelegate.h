@@ -38,6 +38,11 @@
     NSMutableArray *frameworks;
     Boolean hasFrameworks;
     
+    NSMutableArray *extensions;
+    NSMutableDictionary *extensionProvisioningProfiles;
+    NSMutableDictionary *extensionTextFields; // For managing extension dialog text fields
+    NSMutableDictionary *extensionEntitlements; // Store entitlements path for each extension
+    
     IBOutlet IRTextFieldDrag *pathField;
     IBOutlet IRTextFieldDrag *provisioningPathField;
     IBOutlet IRTextFieldDrag *entitlementField;
@@ -49,6 +54,8 @@
     IBOutlet NSTextField *statusLabel;
     IBOutlet NSProgressIndicator *flurry;
     IBOutlet NSButton *changeBundleIDCheckbox;
+    IBOutlet NSTableView *extensionsTableView;
+    IBOutlet NSButton *manageExtensionsButton;
     
     IBOutlet NSComboBox *certComboBox;
     NSMutableArray *certComboBoxItems;
@@ -66,6 +73,7 @@
 - (IBAction)provisioningBrowse:(id)sender;
 - (IBAction)entitlementBrowse:(id)sender;
 - (IBAction)changeBundleIDPressed:(id)sender;
+- (IBAction)manageExtensions:(id)sender;
 
 - (void)checkUnzip:(NSTimer *)timer;
 - (void)checkCopy:(NSTimer *)timer;
